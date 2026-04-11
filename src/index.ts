@@ -8,6 +8,7 @@ import {
   DEFAULT_TRIGGER,
   getTriggerPattern,
   GROUPS_DIR,
+  HEALTH_PORT,
   IDLE_TIMEOUT,
   MAX_MESSAGES_PER_PROMPT,
   ONECLI_URL,
@@ -30,6 +31,7 @@ import {
   ensureContainerRuntimeRunning,
 } from './container-runtime.js';
 import {
+  checkDbHealth,
   getAllChats,
   getAllRegisteredGroups,
   getAllSessions,
@@ -47,6 +49,7 @@ import {
   storeMessage,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
+import { startHealthServer } from './health.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
@@ -694,6 +697,14 @@ async function main(): Promise<void> {
     logger.fatal('No channels connected');
     process.exit(1);
   }
+
+  // Health check endpoint for cloud monitoring
+  await startHealthServer({
+    port: HEALTH_PORT,
+    checkDb: checkDbHealth,
+    checkChannels: () => channels.some((ch) => ch.isConnected()),
+  });
+  logger.info({ port: HEALTH_PORT }, 'Health server started');
 
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({

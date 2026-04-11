@@ -170,6 +170,15 @@ export function initDatabase(): void {
   migrateJsonState();
 }
 
+export function checkDbHealth(): boolean {
+  try {
+    db.prepare('SELECT 1').get();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** @internal - for tests only. Creates a fresh in-memory database. */
 export function _initTestDatabase(): void {
   db = new Database(':memory:');
