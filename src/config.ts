@@ -52,6 +52,10 @@ export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(
   10,
 ); // 10MB default
 export const ONECLI_URL = process.env.ONECLI_URL || envConfig.ONECLI_URL;
+// When set, container-runner passes `--env-file <path>` to `docker run` and skips the
+// OneCLI gateway. Used by cloud deployments where secrets are written to a file by a
+// pre-start hook (e.g. Secret Manager → systemd ExecStartPre → env file).
+export const CONTAINER_ENV_FILE = process.env.CONTAINER_ENV_FILE || '';
 export const MAX_MESSAGES_PER_PROMPT = Math.max(
   1,
   parseInt(process.env.MAX_MESSAGES_PER_PROMPT || '10', 10) || 10,

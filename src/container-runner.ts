@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 
 import {
+  CONTAINER_ENV_FILE,
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
   CONTAINER_TIMEOUT,
@@ -252,19 +253,34 @@ async function buildContainerArgs(
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
 
-  // OneCLI gateway handles credential injection — containers never see real secrets.
-  // The gateway intercepts HTTPS traffic and injects API keys or OAuth tokens.
-  const onecliApplied = await onecli.applyContainerConfig(args, {
-    addHostMapping: false, // Nanoclaw already handles host gateway
-    agent: agentIdentifier,
-  });
-  if (onecliApplied) {
-    logger.info({ containerName }, 'OneCLI gateway config applied');
-  } else {
-    logger.warn(
-      { containerName },
-      'OneCLI gateway not reachable — container will have no credentials',
+  // Credential injection: cloud deployments use a pre-fetched env file
+  // (Secret Manager → systemd ExecStartPre → /mnt/data/.../env). Local dev
+  // uses the OneCLI gateway, which intercepts HTTPS and injects credentials.
+  if (CONTAINER_ENV_FILE && fs.existsSync(CONTAINER_ENV_FILE)) {
+    args.push('--env-file', CONTAINER_ENV_FILE);
+    logger.info(
+      { containerName, envFile: CONTAINER_ENV_FILE },
+      'Container env file applied',
     );
+  } else {
+    if (CONTAINER_ENV_FILE) {
+      logger.warn(
+        { containerName, envFile: CONTAINER_ENV_FILE },
+        'CONTAINER_ENV_FILE set but file does not exist — falling back to OneCLI',
+      );
+    }
+    const onecliApplied = await onecli.applyContainerConfig(args, {
+      addHostMapping: false, // Nanoclaw already handles host gateway
+      agent: agentIdentifier,
+    });
+    if (onecliApplied) {
+      logger.info({ containerName }, 'OneCLI gateway config applied');
+    } else {
+      logger.warn(
+        { containerName },
+        'OneCLI gateway not reachable — container will have no credentials',
+      );
+    }
   }
 
   // Runtime-specific args for host gateway resolution
