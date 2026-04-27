@@ -1,0 +1,142 @@
+# .github/workflows/deploy-staging.yml
+# Deploys to minka-system-stg GCP project on push to staging branch
+#
+# Place this file at .github/workflows/deploy-staging.yml in the forked nanoclaw-minka repo
+# Prerequisites: Terraform must have been applied (creates deploy SA, WIF binding, GCE instance, AR)
+
+name: Deploy to Staging
+
+on:
+  push:
+    branches: [staging]
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false  # Don't cancel in-flight deploys
+
+env:
+  GCP_PROJECT: minka-system-stg
+  GCP_REGION: us-central1
+  GCE_INSTANCE: nanoclaw-stg
+  GCE_ZONE: us-central1-a
+  AR_REPO: us-central1-docker.pkg.dev/minka-system-stg/minka-system
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run build
+
+      - name: Lint
+        run: npm run lint --if-present
+
+      - name: Test
+        run: npm test
+
+  build-agent-image:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write  # For Workload Identity Federation
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SA_EMAIL }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.GCP_REGION }}-docker.pkg.dev --quiet
+
+      - name: Build agent container image
+        run: |
+          docker build \
+            -t ${{ env.AR_REPO }}/nanoclaw-agent:${{ github.sha }} \
+            -t ${{ env.AR_REPO }}/nanoclaw-agent:latest \
+            -f container/Dockerfile \
+            container/
+
+      - name: Push agent container image
+        run: |
+          docker push ${{ env.AR_REPO }}/nanoclaw-agent:${{ github.sha }}
+          docker push ${{ env.AR_REPO }}/nanoclaw-agent:latest
+
+  deploy:
+    needs: build-agent-image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SA_EMAIL }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy to GCE instance
+        run: |
+          gcloud compute ssh ${{ env.GCE_INSTANCE }} \
+            --zone=${{ env.GCE_ZONE }} \
+            --project=${{ env.GCP_PROJECT }} \
+            --tunnel-through-iap \
+            --command="$(cat <<'SCRIPT'
+          set -euo pipefail
+
+          # Pull latest agent image
+          docker pull ${{ env.AR_REPO }}/nanoclaw-agent:latest
+
+          # Update application code
+          cd /mnt/data/nanoclaw
+          git fetch origin staging
+          git reset --hard origin/staging
+          npm ci --production
+
+          # Compile TypeScript
+          npm run build
+
+          # Restart service (ExecStartPre fetches secrets automatically)
+          sudo systemctl restart nanoclaw
+
+          # Wait for health check
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:3000/health > /dev/null 2>&1; then
+              echo "Health check passed"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Health check failed after 60s"
+          sudo journalctl -u nanoclaw --no-pager -n 50
+          exit 1
+          SCRIPT
+          )"
+
+      - name: Post deployment status
+        if: failure()
+        run: |
+          echo "::error::Staging deployment failed. Check GCE instance logs."
