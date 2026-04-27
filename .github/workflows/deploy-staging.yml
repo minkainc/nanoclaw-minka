@@ -98,6 +98,25 @@ jobs:
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
+      - name: Package source for VM
+        # Tar the workspace minus build artifacts. The VM installs deps and
+        # builds in place — keeps the artifact small and avoids platform
+        # mismatches between the runner and the VM.
+        run: |
+          tar czf /tmp/nanoclaw-source.tgz \
+            --exclude='.git' \
+            --exclude='node_modules' \
+            --exclude='dist' \
+            .
+
+      - name: Push source to VM
+        run: |
+          gcloud compute scp /tmp/nanoclaw-source.tgz \
+            --zone=${{ env.GCE_ZONE }} \
+            --project=${{ env.GCP_PROJECT }} \
+            --tunnel-through-iap \
+            ${{ env.GCE_INSTANCE }}:/tmp/nanoclaw-source.tgz
+
       - name: Deploy to GCE instance
         run: |
           gcloud compute ssh ${{ env.GCE_INSTANCE }} \
@@ -107,22 +126,27 @@ jobs:
             --command="$(cat <<'SCRIPT'
           set -euo pipefail
 
-          # Pull latest agent image
-          docker pull ${{ env.AR_REPO }}/nanoclaw-agent:latest
+          # Make /mnt/data/nanoclaw writable by the nanoclaw user (the daemon
+          # runs as nanoclaw and that user is in the docker group).
+          sudo install -d -o nanoclaw -g nanoclaw /mnt/data/nanoclaw
+          sudo chown nanoclaw:nanoclaw /tmp/nanoclaw-source.tgz
 
-          # Update application code
+          # Unpack source, install deps, build — all as nanoclaw so file
+          # ownership stays consistent and docker access works without sudo.
+          sudo -u nanoclaw bash <<'NANOCLAW_OPS'
+          set -euo pipefail
           cd /mnt/data/nanoclaw
-          git fetch origin staging
-          git reset --hard origin/staging
-          npm ci --production
-
-          # Compile TypeScript
+          tar xzf /tmp/nanoclaw-source.tgz
+          npm ci
           npm run build
+          docker pull ${{ env.AR_REPO }}/nanoclaw-agent:latest
+          NANOCLAW_OPS
 
-          # Restart service (ExecStartPre fetches secrets automatically)
+          # Restart the orchestrator. ExecStartPre fetches secrets from
+          # Secret Manager and writes them to the env file before start.
           sudo systemctl restart nanoclaw
 
-          # Wait for health check
+          # Poll /health for up to 60s.
           for i in $(seq 1 30); do
             if curl -sf http://localhost:3000/health > /dev/null 2>&1; then
               echo "Health check passed"
@@ -131,7 +155,7 @@ jobs:
             sleep 2
           done
           echo "Health check failed after 60s"
-          sudo journalctl -u nanoclaw --no-pager -n 50
+          sudo journalctl -u nanoclaw --no-pager -n 80
           exit 1
           SCRIPT
           )"
