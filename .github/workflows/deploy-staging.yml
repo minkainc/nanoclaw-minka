@@ -131,15 +131,21 @@ jobs:
           sudo install -d -o nanoclaw -g nanoclaw /mnt/data/nanoclaw
           sudo chown nanoclaw:nanoclaw /tmp/nanoclaw-source.tgz
 
+          # Pull the agent image as root: the setup script configured docker
+          # auth for /root only (gcloud-as-cred-helper); snap-installed gcloud
+          # refuses home dirs outside /home so configuring it for the nanoclaw
+          # user is non-trivial. Image cache is shared across users — nanoclaw
+          # can run containers from this image without its own auth.
+          sudo docker pull ${{ env.AR_REPO }}/nanoclaw-agent:latest
+
           # Unpack source, install deps, build — all as nanoclaw so file
-          # ownership stays consistent and docker access works without sudo.
+          # ownership stays consistent.
           sudo -u nanoclaw bash <<'NANOCLAW_OPS'
           set -euo pipefail
           cd /mnt/data/nanoclaw
           tar xzf /tmp/nanoclaw-source.tgz
           npm ci
           npm run build
-          docker pull ${{ env.AR_REPO }}/nanoclaw-agent:latest
           NANOCLAW_OPS
 
           # Restart the orchestrator. ExecStartPre fetches secrets from
