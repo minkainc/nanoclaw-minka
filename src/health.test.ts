@@ -12,9 +12,7 @@ function request(
       .get(`http://127.0.0.1:${port}${path}`, (res) => {
         let body = '';
         res.on('data', (chunk) => (body += chunk));
-        res.on('end', () =>
-          resolve({ status: res.statusCode!, body }),
-        );
+        res.on('end', () => resolve({ status: res.statusCode!, body }));
       })
       .on('error', reject);
   });
