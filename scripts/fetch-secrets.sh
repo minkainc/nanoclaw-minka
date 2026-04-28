@@ -1,32 +1,48 @@
 #!/bin/bash
-# Fetches secrets from GCP Secret Manager and writes them to the env file
-# Called by systemd ExecStartPre before NanoClaw starts
+# Fetches secrets from GCP Secret Manager and writes them to the env file.
+# Called by systemd ExecStartPre as the nanoclaw user.
+#
+# Uses the metadata server + Secret Manager REST API directly via curl,
+# bypassing snap-installed gcloud (which refuses HOME outside /home — the
+# nanoclaw user's home is /mnt/data/nanoclaw).
 set -euo pipefail
 
 ENV_DIR="/mnt/data/nanoclaw/data/env"
 ENV_FILE="$ENV_DIR/env"
 mkdir -p "$ENV_DIR"
 
-# Determine project from metadata server
-PROJECT=$(curl -s -H "Metadata-Flavor: Google" \
-  http://metadata.google.internal/computeMetadata/v1/project/project-id)
+METADATA_HEADER="Metadata-Flavor: Google"
+METADATA_BASE="http://metadata.google.internal/computeMetadata/v1"
+
+PROJECT=$(curl -fsS -H "$METADATA_HEADER" "$METADATA_BASE/project/project-id")
+TOKEN=$(curl -fsS -H "$METADATA_HEADER" \
+  "$METADATA_BASE/instance/service-accounts/default/token" |
+  python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"])')
 
 echo "Fetching secrets from project: $PROJECT"
 
-# Fetch each secret and write to env file
-# Only fetches secrets that exist — missing secrets are skipped with a warning
-: > "$ENV_FILE"  # truncate
+: > "$ENV_FILE"
 
 fetch_secret() {
   local name=$1
   local env_var=$2
-  local value
-  if value=$(gcloud secrets versions access latest --secret="$name" --project="$PROJECT" 2>/dev/null); then
-    echo "${env_var}=${value}" >> "$ENV_FILE"
-    echo "  Loaded: $name -> $env_var"
-  else
+  local url="https://secretmanager.googleapis.com/v1/projects/$PROJECT/secrets/$name/versions/latest:access"
+  local body value
+
+  body=$(curl -fsS -H "Authorization: Bearer $TOKEN" "$url" 2>/dev/null) || {
     echo "  Warning: Secret '$name' not found or not accessible, skipping"
-  fi
+    return
+  }
+
+  # Response shape: { "name": "...", "payload": { "data": "<base64>" } }
+  value=$(printf '%s' "$body" |
+    python3 -c 'import sys,json,base64; print(base64.b64decode(json.load(sys.stdin)["payload"]["data"]).decode("utf-8"), end="")') || {
+    echo "  Warning: Secret '$name' decode failed, skipping"
+    return
+  }
+
+  echo "${env_var}=${value}" >> "$ENV_FILE"
+  echo "  Loaded: $name -> $env_var"
 }
 
 fetch_secret "anthropic-api-key"     "ANTHROPIC_API_KEY"
