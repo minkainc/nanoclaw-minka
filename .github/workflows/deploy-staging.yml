@@ -109,6 +109,17 @@ jobs:
             --exclude='dist' \
             .
 
+      - name: Clean stale source tarball
+        # Previous deploy may have left /tmp/nanoclaw-source.tgz with non-deploy
+        # ownership (e.g. nanoclaw via earlier chown), which blocks scp from
+        # overwriting. Remove first.
+        run: |
+          gcloud compute ssh ${{ env.GCE_INSTANCE }} \
+            --zone=${{ env.GCE_ZONE }} \
+            --project=${{ env.GCP_PROJECT }} \
+            --tunnel-through-iap \
+            --command="sudo rm -f /tmp/nanoclaw-source.tgz"
+
       - name: Push source to VM
         run: |
           gcloud compute scp /tmp/nanoclaw-source.tgz \
@@ -127,9 +138,9 @@ jobs:
           set -euo pipefail
 
           # Make /mnt/data/nanoclaw writable by the nanoclaw user (the daemon
-          # runs as nanoclaw and that user is in the docker group).
+          # runs as nanoclaw and that user is in the docker group). The
+          # tarball stays owned by the deploy SA's user — readable to all.
           sudo install -d -o nanoclaw -g nanoclaw /mnt/data/nanoclaw
-          sudo chown nanoclaw:nanoclaw /tmp/nanoclaw-source.tgz
 
           # Pull the agent image as root: the setup script configured docker
           # auth for /root only (gcloud-as-cred-helper); snap-installed gcloud
